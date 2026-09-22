@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import OpenAI from 'openai';
+import { randomUUID } from 'node:crypto';
 import {
   EXTRACTION_TOOL,
   EXTRACTION_PROMPT,
@@ -17,7 +17,14 @@ export interface AnthropicLike {
 }
 
 export async function createAnthropicClient(apiKey: string): Promise<AnthropicLike> {
-  const openai = new OpenAI({ apiKey });
+  const endpoint = process.env.IAEDU_ENDPOINT;
+  const channelId = process.env.IAEDU_CHANNEL_ID;
+
+  if (!endpoint || !channelId) {
+    throw new Error(
+      'Missing IAEDU_ENDPOINT or IAEDU_CHANNEL_ID environment variable.',
+    );
+  }
 
   return {
     messages: {
@@ -27,67 +34,83 @@ export async function createAnthropicClient(apiKey: string): Promise<AnthropicLi
 
         const image = content.find((item) => item.type === 'image');
         const text = content.find((item) => item.type === 'text');
-        const tool = request.tools[0];
+        const tool = request.tools?.[0];
 
         if (!image || !text || !tool) {
-          throw new Error('Invalid extraction request: expected image, prompt, and tool schema.');
+          throw new Error(
+            'Invalid extraction request: expected an image, prompt, and output schema.',
+          );
         }
 
-        const response = await openai.chat.completions.create({
-          model: request.model,
-          max_tokens: request.max_tokens,
-          temperature: 0,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'image_url',
-                  image_url: {
-                    url: `data:${image.source.media_type};base64,${image.source.data}`,
-                  },
-                },
-                {
-                  type: 'text',
-                  text: text.text,
-                },
-              ],
-            },
-          ],
-          tools: [
-            {
-              type: 'function',
-              function: {
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.input_schema,
-              },
-            },
-          ],
-          tool_choice: {
-            type: 'function',
-            function: {
-              name: 'record_page',
-            },
-          },
-        });
+        const prompt = [
+          text.text,
+          '',
+          'Return ONLY one valid JSON object.',
+          'Do not use Markdown fences or explanatory text.',
+          'It must conform exactly to this JSON Schema:',
+          JSON.stringify(tool.input_schema),
+        ].join('\n');
 
-        const toolCall = response.choices[0]?.message.tool_calls?.find(
-          (call: any) =>
-            call.type === 'function' &&
-            call.function.name === 'record_page',
+        const form = new FormData();
+        form.set('channel_id', channelId);
+        form.set('thread_id', `rm-brain-${randomUUID()}`);
+        form.set('user_info', '{}');
+        form.set('message', prompt);
+        form.set(
+          'image',
+          new Blob(
+            [Buffer.from(image.source.data, 'base64')],
+            { type: image.source.media_type },
+          ),
+          'remarkable-page.png',
         );
 
-        if (!toolCall) {
-          throw new Error('GPT-4o did not return the required record_page tool call.');
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'x-api-key': apiKey,
+          },
+          body: form,
+        });
+
+        if (!response.ok) {
+          throw new Error(
+            `IAedu request failed: ${response.status} ${await response.text()}`,
+          );
         }
+
+        const body = await response.text();
+        let answer = '';
+
+        for (const line of body.split('\n')) {
+          const trimmed = line.trim();
+
+          if (!trimmed) continue;
+
+          try {
+            const event = JSON.parse(trimmed);
+
+            if (event.type === 'token' && typeof event.content === 'string') {
+              answer += event.content;
+            }
+          } catch {
+            // Ignore non-JSON stream lines.
+          }
+        }
+
+        const json = answer
+          .trim()
+          .replace(/^```json\s*/i, '')
+          .replace(/^```\s*/i, '')
+          .replace(/\s*```$/i, '')
+          .trim();
 
         return {
           content: [
             {
               type: 'tool_use',
               name: 'record_page',
-              input: JSON.parse(toolCall.function.arguments),
+              input: JSON.parse(json),
             },
           ],
         };

@@ -58,7 +58,6 @@
     "@modelcontextprotocol/sdk": "^1.10.0",
     "better-sqlite3": "^11.8.0",
     "cli-table3": "^0.6.5",
-    "openai": "^7.21.0",
     "picocolors": "^1.1.0",
     "zod": "^3.24.0"
   },
