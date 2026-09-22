@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import OpenAI from 'openai';
 import {
   EXTRACTION_TOOL,
   EXTRACTION_PROMPT,
@@ -16,8 +17,83 @@ export interface AnthropicLike {
 }
 
 export async function createAnthropicClient(apiKey: string): Promise<AnthropicLike> {
-  const { default: Anthropic } = await import('@anthropic-ai/sdk');
-  return new Anthropic({ apiKey }) as unknown as AnthropicLike;
+  const openai = new OpenAI({ apiKey });
+
+  return {
+    messages: {
+      async create(args: Record<string, unknown>) {
+        const request = args as any;
+        const content = request.messages[0].content as any[];
+
+        const image = content.find((item) => item.type === 'image');
+        const text = content.find((item) => item.type === 'text');
+        const tool = request.tools[0];
+
+        if (!image || !text || !tool) {
+          throw new Error('Invalid extraction request: expected image, prompt, and tool schema.');
+        }
+
+        const response = await openai.chat.completions.create({
+          model: request.model,
+          max_tokens: request.max_tokens,
+          temperature: 0,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:${image.source.media_type};base64,${image.source.data}`,
+                  },
+                },
+                {
+                  type: 'text',
+                  text: text.text,
+                },
+              ],
+            },
+          ],
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.input_schema,
+              },
+            },
+          ],
+          tool_choice: {
+            type: 'function',
+            function: {
+              name: 'record_page',
+            },
+          },
+        });
+
+        const toolCall = response.choices[0]?.message.tool_calls?.find(
+          (call: any) =>
+            call.type === 'function' &&
+            call.function.name === 'record_page',
+        );
+
+        if (!toolCall) {
+          throw new Error('GPT-4o did not return the required record_page tool call.');
+        }
+
+        return {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'record_page',
+              input: JSON.parse(toolCall.function.arguments),
+            },
+          ],
+        };
+      },
+    },
+  };
 }
 
 export async function extractPage(opts: {
